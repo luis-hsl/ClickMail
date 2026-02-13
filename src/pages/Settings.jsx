@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import {
   Cloud, Key, Bot, Server, Save, CheckCircle2, XCircle, Loader2,
   AlertTriangle, Eye, EyeOff, Bell, BellOff, Shield, Wifi,
+  HelpCircle, ExternalLink, X, ChevronRight,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { C } from "@/theme/colors";
@@ -19,6 +20,21 @@ const integrations = [
       { key: "AWS_SECRET_ACCESS_KEY", label: "Secret Access Key", secret: true },
       { key: "AWS_REGION", label: "Região", secret: false, placeholder: "sa-east-1" },
     ],
+    help: {
+      title: "Como configurar o Amazon SES",
+      steps: [
+        "Acesse o console AWS: console.aws.amazon.com",
+        "Vá em IAM > Users > Create User",
+        "Crie um usuário com acesso Programmatic (API)",
+        "Anexe a policy AmazonSESFullAccess",
+        "Copie o Access Key ID (começa com AKIA...)",
+        "Copie o Secret Access Key",
+        "Em Região, use sa-east-1 (São Paulo) ou us-east-1 (Virginia)",
+        "No SES, vá em Verified Identities e verifique seu domínio",
+        "Se estiver em Sandbox, solicite Production Access",
+      ],
+      link: "https://docs.aws.amazon.com/ses/latest/dg/setting-up.html",
+    },
   },
   {
     id: "millionverifier",
@@ -29,6 +45,18 @@ const integrations = [
     fields: [
       { key: "MILLIONVERIFIER_API_KEY", label: "API Key", secret: true },
     ],
+    help: {
+      title: "Como configurar o MillionVerifier",
+      steps: [
+        "Crie sua conta em millionverifier.com",
+        "Faça login no painel",
+        "Vá em API > API Key",
+        "Copie a API Key exibida",
+        "Cole no campo acima e clique Salvar",
+        "A verificação consome créditos por email verificado",
+      ],
+      link: "https://www.millionverifier.com/api",
+    },
   },
   {
     id: "gemini",
@@ -39,6 +67,20 @@ const integrations = [
     fields: [
       { key: "GEMINI_API_KEY", label: "API Key", secret: true },
     ],
+    help: {
+      title: "Como configurar o Gemini AI",
+      steps: [
+        "Acesse aistudio.google.com",
+        "Faça login com sua conta Google",
+        "Clique em Get API Key no menu lateral",
+        "Clique em Create API Key",
+        "Selecione um projeto GCP (ou crie um novo)",
+        "Copie a API Key gerada (começa com AIza...)",
+        "Cole no campo acima e clique Salvar",
+        "O plano gratuito permite ~1500 requests/dia",
+      ],
+      link: "https://aistudio.google.com/apikey",
+    },
   },
   {
     id: "n8n",
@@ -49,8 +91,73 @@ const integrations = [
     fields: [
       { key: "N8N_WEBHOOK_BASE_URL", label: "Webhook Base URL", secret: false, placeholder: "https://n8n.seudominio.com/webhook" },
     ],
+    help: {
+      title: "Como configurar o n8n",
+      steps: [
+        "Use o n8n Cloud (app.n8n.cloud) ou self-hosted",
+        "A URL base é o endereço do seu n8n + /webhook",
+        "Exemplo Cloud: https://seuapp.app.n8n.cloud/webhook",
+        "Exemplo Self-hosted: https://n8n.seudominio.com/webhook",
+        "Os workflows do Clickmail já estão configurados no n8n",
+        "Verifique se os 5 workflows estão ativos no painel n8n",
+        "Cole a Webhook Base URL acima e clique Salvar",
+      ],
+      link: "https://docs.n8n.io/hosting/",
+    },
   },
 ];
+
+function HelpPanel({ help, open, onClose }) {
+  if (!open || !help) return null;
+  return (
+    <div style={{
+      background: C.bg, borderRadius: 12, border: `1px solid ${C.border}`,
+      padding: "16px 20px", marginBottom: 16, animation: "fadeIn 0.25s ease-out",
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <h4 style={{ fontSize: 14, fontWeight: 700, color: C.text, display: "flex", alignItems: "center", gap: 8 }}>
+          <HelpCircle size={16} color={C.accent} />
+          {help.title}
+        </h4>
+        <button onClick={onClose} style={{
+          background: "none", border: "none", cursor: "pointer", color: C.textDim, padding: 2,
+        }}>
+          <X size={14} />
+        </button>
+      </div>
+      <ol style={{ margin: 0, paddingLeft: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 8 }}>
+        {help.steps.map((step, i) => (
+          <li key={i} style={{ display: "flex", alignItems: "flex-start", gap: 10, fontSize: 13, color: C.textMuted, lineHeight: 1.5 }}>
+            <span style={{
+              flexShrink: 0, width: 22, height: 22, borderRadius: 7,
+              background: C.accentBg, color: C.accent, fontSize: 11, fontWeight: 700,
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}>{i + 1}</span>
+            <span style={{ paddingTop: 2 }}>{step}</span>
+          </li>
+        ))}
+      </ol>
+      {help.link && (
+        <a
+          href={help.link}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            display: "inline-flex", alignItems: "center", gap: 6, marginTop: 14,
+            fontSize: 12, fontWeight: 600, color: C.accent, textDecoration: "none",
+            padding: "6px 12px", borderRadius: 8, background: C.accentBg,
+            transition: "opacity 0.2s",
+          }}
+          onMouseEnter={e => e.currentTarget.style.opacity = "0.8"}
+          onMouseLeave={e => e.currentTarget.style.opacity = "1"}
+        >
+          <ExternalLink size={12} />
+          Ver documentação oficial
+        </a>
+      )}
+    </div>
+  );
+}
 
 const notificationKeys = [
   { key: "NOTIFY_CAMPAIGN_COMPLETE", label: "Campanha concluída" },
@@ -132,6 +239,7 @@ export default function Settings() {
 
   const [testing, setTesting] = useState({});
   const [testResult, setTestResult] = useState({});
+  const [showHelp, setShowHelp] = useState({});
 
   const isConnected = (integration) => {
     return integration.fields.every(f => settings[f.key] && settings[f.key].trim().length > 0);
@@ -145,8 +253,9 @@ export default function Settings() {
       if (id === "n8n") {
         const url = (settings.N8N_WEBHOOK_BASE_URL || "").replace(/\/+$/, "");
         if (!url) throw new Error("URL não configurada");
-        const res = await fetch(url, { method: "HEAD", mode: "no-cors" });
-        setTestResult(s => ({ ...s, [id]: { ok: true, msg: "Servidor acessível" } }));
+        if (!url.startsWith("https://")) throw new Error("URL deve começar com https://");
+        if (!url.includes("webhook")) throw new Error("URL deve conter /webhook");
+        setTestResult(s => ({ ...s, [id]: { ok: true, msg: "URL formatada corretamente" } }));
       } else if (id === "ses") {
         // Basic validation — keys present and formatted
         const accessKey = settings.AWS_ACCESS_KEY_ID || "";
@@ -229,16 +338,40 @@ export default function Settings() {
                     <p style={{ fontSize: 13, color: C.textDim }}>{integ.description}</p>
                   </div>
                 </div>
-                <span style={{
-                  fontSize: 11, fontWeight: 600, padding: "4px 10px", borderRadius: 8,
-                  background: connected ? C.accentBg : "rgba(113,113,122,0.1)",
-                  color: connected ? C.accent : C.textDim,
-                  display: "flex", alignItems: "center", gap: 5,
-                }}>
-                  {connected ? <CheckCircle2 size={12} /> : <XCircle size={12} />}
-                  {connected ? "Conectado" : "Não configurado"}
-                </span>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <button
+                    onClick={() => setShowHelp(s => ({ ...s, [integ.id]: !s[integ.id] }))}
+                    title="Como configurar"
+                    style={{
+                      width: 28, height: 28, borderRadius: 8, border: `1px solid ${C.border}`,
+                      background: showHelp[integ.id] ? C.accentBg : "transparent",
+                      color: showHelp[integ.id] ? C.accent : C.textDim,
+                      cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+                      transition: "all 0.2s", flexShrink: 0,
+                    }}
+                    onMouseEnter={e => { if (!showHelp[integ.id]) { e.currentTarget.style.borderColor = C.accent; e.currentTarget.style.color = C.accent; } }}
+                    onMouseLeave={e => { if (!showHelp[integ.id]) { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.textDim; } }}
+                  >
+                    <HelpCircle size={15} />
+                  </button>
+                  <span style={{
+                    fontSize: 11, fontWeight: 600, padding: "4px 10px", borderRadius: 8,
+                    background: connected ? C.accentBg : "rgba(113,113,122,0.1)",
+                    color: connected ? C.accent : C.textDim,
+                    display: "flex", alignItems: "center", gap: 5,
+                  }}>
+                    {connected ? <CheckCircle2 size={12} /> : <XCircle size={12} />}
+                    {connected ? "Conectado" : "Não configurado"}
+                  </span>
+                </div>
               </div>
+
+              {/* Help Panel */}
+              <HelpPanel
+                help={integ.help}
+                open={!!showHelp[integ.id]}
+                onClose={() => setShowHelp(s => ({ ...s, [integ.id]: false }))}
+              />
 
               {/* Fields */}
               <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 16 }}>

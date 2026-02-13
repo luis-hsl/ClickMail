@@ -1,54 +1,25 @@
 import { supabase } from '@/lib/supabase'
 
 // =============================================
-// N8N WEBHOOK HELPER
+// N8N — Routed through trigger-n8n Edge Function (avoids CORS)
 // =============================================
-async function getN8nBaseUrl() {
-  const { data } = await supabase
-    .from('app_settings')
-    .select('value')
-    .eq('key', 'N8N_WEBHOOK_BASE_URL')
-    .single()
-  return data?.value || null
-}
-
-async function safeJson(res) {
-  const text = await res.text()
-  if (!text) return { success: true }
-  try { return JSON.parse(text) } catch { return { raw: text } }
-}
-
 export const n8nService = {
   async triggerVerifyList(listId) {
-    const baseUrl = await getN8nBaseUrl()
-    if (!baseUrl) throw new Error('URL do n8n não configurada. Acesse Configurações.')
-    const url = baseUrl.replace(/\/+$/, '') + '/verify-email-list'
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ list_id: listId }),
+    const { data, error } = await supabase.functions.invoke('trigger-n8n', {
+      body: { workflow: 'verify-email-list', data: { list_id: listId } },
     })
-    if (!res.ok) {
-      const body = await safeJson(res)
-      throw new Error(body.message || body.error || `Erro n8n: ${res.status}`)
-    }
-    return safeJson(res)
+    if (error) throw error
+    if (data && !data.success) throw new Error(data.data?.message || data.data?.error || `Erro n8n: ${data.status}`)
+    return data
   },
 
   async triggerGenerateVariants(campaignId) {
-    const baseUrl = await getN8nBaseUrl()
-    if (!baseUrl) throw new Error('URL do n8n não configurada. Acesse Configurações.')
-    const url = baseUrl.replace(/\/+$/, '') + '/generate-variants'
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ campaign_id: campaignId }),
+    const { data, error } = await supabase.functions.invoke('trigger-n8n', {
+      body: { workflow: 'generate-variants', data: { campaign_id: campaignId } },
     })
-    if (!res.ok) {
-      const body = await safeJson(res)
-      throw new Error(body.message || body.error || `Erro n8n: ${res.status}`)
-    }
-    return safeJson(res)
+    if (error) throw error
+    if (data && !data.success) throw new Error(data.data?.message || data.data?.error || `Erro n8n: ${data.status}`)
+    return data
   },
 }
 
