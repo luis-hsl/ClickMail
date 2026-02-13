@@ -1,0 +1,389 @@
+{
+  "name": "Clickmail — Aquecimento & Disparo SES",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 */1 8-18 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "Cron (Hora em Hora, Seg-Sex, 8h-18h)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.*, d.domain, d.warmup_daily_limit, d.bounce_rate as domain_bounce_rate, d.complaint_rate as domain_complaint_rate FROM clickmail.email_campaigns c JOIN clickmail.email_domains d ON c.domain_id = d.id WHERE c.status IN ('warming_up', 'sending') AND c.send_between_start <= EXTRACT(HOUR FROM now() AT TIME ZONE c.send_timezone)::int AND c.send_between_end > EXTRACT(HOUR FROM now() AT TIME ZONE c.send_timezone)::int;",
+        "options": {}
+      },
+      "id": "fetch-active-campaigns",
+      "name": "Buscar Campanhas Ativas",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [440, 300],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.domain_complaint_rate }}",
+              "rightValue": 0.1,
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            },
+            {
+              "leftValue": "={{ $json.domain_bounce_rate }}",
+              "rightValue": 5,
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "check-domain-health",
+      "name": "Domínio Saudável?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE clickmail.email_campaigns SET status = 'paused', updated_at = now() WHERE id = '{{ $json.id }}'; UPDATE clickmail.email_domains SET warmup_status = 'paused' WHERE id = '{{ $json.domain_id }}';",
+        "options": {}
+      },
+      "id": "pause-unhealthy",
+      "name": "Pausar (Domínio Doente)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [880, 500],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT ws.*, (SELECT COUNT(*) FROM clickmail.email_sends es WHERE es.campaign_id = ws.campaign_id AND es.created_at::date = CURRENT_DATE) as already_sent_today FROM clickmail.warmup_schedule ws WHERE ws.campaign_id = '{{ $json.id }}' AND ws.scheduled_date = CURRENT_DATE AND ws.status IN ('pending', 'in_progress') LIMIT 1;",
+        "options": {}
+      },
+      "id": "fetch-today-schedule",
+      "name": "Buscar Schedule de Hoje",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [880, 200],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const schedule = $input.first().json;\nconst campaign = $('Buscar Campanhas Ativas').item.json;\n\nif (!schedule || !schedule.id) {\n  return { should_send: false, reason: 'Sem schedule para hoje' };\n}\n\nconst remaining = schedule.planned_volume - (schedule.already_sent_today || 0);\n\n// Dividir envios pelas horas restantes do dia\nconst hoursLeft = campaign.send_between_end - new Date().getHours();\nconst batchSize = Math.min(\n  Math.ceil(remaining / Math.max(hoursLeft, 1)),\n  50 // máximo 50 por batch para não sobrecarregar\n);\n\nreturn {\n  should_send: remaining > 0,\n  batch_size: batchSize,\n  remaining: remaining,\n  schedule_id: schedule.id,\n  campaign_id: campaign.id,\n  list_id: campaign.list_id\n};"
+      },
+      "id": "calculate-batch",
+      "name": "Calcular Batch de Envio",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.should_send }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "should-send",
+      "name": "Deve Enviar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [1320, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT ec.id as contact_id, ec.email, ec.name FROM clickmail.email_contacts ec WHERE ec.list_id = '{{ $json.list_id }}' AND ec.verification_status = 'valid' AND ec.is_unsubscribed = FALSE AND ec.is_blacklisted = FALSE AND ec.id NOT IN (SELECT es.contact_id FROM clickmail.email_sends es WHERE es.campaign_id = '{{ $json.campaign_id }}') ORDER BY ec.total_opened DESC NULLS LAST, ec.created_at LIMIT {{ $json.batch_size }};",
+        "options": {}
+      },
+      "id": "fetch-eligible-contacts",
+      "name": "Buscar Contatos Elegíveis",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1540, 100],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, variant_label, subject, preview_text, body_html, body_text, weight FROM clickmail.email_variants WHERE campaign_id = '{{ $('Calcular Batch de Envio').first().json.campaign_id }}' ORDER BY weight DESC;",
+        "options": {}
+      },
+      "id": "fetch-variants",
+      "name": "Buscar Variações",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1540, 300],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const contacts = $('Buscar Contatos Elegíveis').all().map(i => i.json);\nconst variants = $('Buscar Variações').all().map(i => i.json);\nconst campaign = $('Buscar Campanhas Ativas').item.json;\nconst scheduleId = $('Calcular Batch de Envio').first().json.schedule_id;\n\nif (!contacts.length || !variants.length) {\n  return [{ json: { skip: true } }];\n}\n\n// Distribuir contatos entre variações pelo weight\nconst totalWeight = variants.reduce((sum, v) => sum + v.weight, 0);\nlet variantIndex = 0;\nlet variantCount = 0;\nconst variantLimit = Math.ceil(contacts.length * (variants[0].weight / totalWeight));\n\nconst sends = contacts.map((contact, i) => {\n  // Rotacionar variantes\n  if (variantCount >= variantLimit && variantIndex < variants.length - 1) {\n    variantIndex++;\n    variantCount = 0;\n  }\n  variantCount++;\n  \n  const variant = variants[variantIndex];\n  \n  // Personalizar corpo\n  const name = contact.name || 'there';\n  const bodyHtml = variant.body_html.replace(/\\{\\{name\\}\\}/g, name);\n  const bodyText = variant.body_text.replace(/\\{\\{name\\}\\}/g, name);\n  const subject = variant.subject.replace(/\\{\\{name\\}\\}/g, name);\n  \n  return {\n    json: {\n      contact_id: contact.contact_id,\n      email: contact.email,\n      name: name,\n      variant_id: variant.id,\n      variant_label: variant.variant_label,\n      subject: subject,\n      body_html: bodyHtml,\n      body_text: bodyText,\n      from_name: campaign.from_name,\n      from_email: campaign.from_email,\n      reply_to: campaign.reply_to || campaign.from_email,\n      campaign_id: campaign.id,\n      schedule_id: scheduleId\n    }\n  };\n});\n\nreturn sends;"
+      },
+      "id": "prepare-sends",
+      "name": "Preparar Envios",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1760, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://email.sa-east-1.amazonaws.com/",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/x-www-form-urlencoded"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "Action", "value": "SendEmail" },
+            { "name": "Source", "value": "={{ $json.from_name }} <{{ $json.from_email }}>" },
+            { "name": "Destination.ToAddresses.member.1", "value": "={{ $json.email }}" },
+            { "name": "ReplyToAddresses.member.1", "value": "={{ $json.reply_to }}" },
+            { "name": "Message.Subject.Data", "value": "={{ $json.subject }}" },
+            { "name": "Message.Subject.Charset", "value": "UTF-8" },
+            { "name": "Message.Body.Html.Data", "value": "={{ $json.body_html }}" },
+            { "name": "Message.Body.Html.Charset", "value": "UTF-8" },
+            { "name": "Message.Body.Text.Data", "value": "={{ $json.body_text }}" },
+            { "name": "Message.Body.Text.Charset", "value": "UTF-8" },
+            { "name": "ConfigurationSetName", "value": "clickmail-tracking" }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "send-via-ses",
+      "name": "Enviar via Amazon SES",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1980, 200],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "AWS_SES_CREDENTIAL_ID",
+          "name": "AWS SES"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const sesResponse = $input.item.json;\nconst sendData = $('Preparar Envios').item.json;\n\n// Extrair message ID da resposta SES\nlet sesMessageId = null;\nlet status = 'sent';\nlet errorMessage = null;\n\nif (sesResponse.SendEmailResponse) {\n  sesMessageId = sesResponse.SendEmailResponse.SendEmailResult?.MessageId;\n} else if (sesResponse.Error) {\n  status = 'failed';\n  errorMessage = sesResponse.Error.Message || 'SES error';\n}\n\nreturn {\n  campaign_id: sendData.campaign_id,\n  variant_id: sendData.variant_id,\n  contact_id: sendData.contact_id,\n  ses_message_id: sesMessageId,\n  status: status,\n  error_message: errorMessage,\n  schedule_id: sendData.schedule_id\n};"
+      },
+      "id": "parse-ses-response",
+      "name": "Parsear Resposta SES",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2200, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO clickmail.email_sends (campaign_id, variant_id, contact_id, ses_message_id, status, sent_at, error_message) VALUES ('{{ $json.campaign_id }}', '{{ $json.variant_id }}', '{{ $json.contact_id }}', {{ $json.ses_message_id ? \"'\" + $json.ses_message_id + \"'\" : 'NULL' }}, '{{ $json.status }}', now(), {{ $json.error_message ? \"'\" + $json.error_message.replace(/'/g, \"''\") + \"'\" : 'NULL' }});",
+        "options": {}
+      },
+      "id": "log-send",
+      "name": "Registrar Envio",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2420, 200],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 0.1,
+        "unit": "seconds"
+      },
+      "id": "ses-rate-limit",
+      "name": "Rate Limit SES (100ms)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [2640, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH send_counts AS (\n  SELECT\n    COUNT(*) FILTER (WHERE status = 'sent') as sent,\n    COUNT(*) FILTER (WHERE status = 'delivered') as delivered,\n    COUNT(*) FILTER (WHERE status = 'bounced') as bounced,\n    COUNT(*) FILTER (WHERE status = 'opened') as opened\n  FROM clickmail.email_sends\n  WHERE campaign_id = '{{ $('Calcular Batch de Envio').first().json.campaign_id }}'\n)\nUPDATE clickmail.email_campaigns SET\n  total_sent = send_counts.sent + send_counts.delivered + send_counts.bounced,\n  total_delivered = send_counts.delivered,\n  total_bounced = send_counts.bounced,\n  total_opened = send_counts.opened,\n  open_rate = CASE WHEN (send_counts.delivered) > 0 THEN ROUND(send_counts.opened::numeric / send_counts.delivered * 100, 2) ELSE 0 END,\n  bounce_rate = CASE WHEN (send_counts.sent + send_counts.delivered + send_counts.bounced) > 0 THEN ROUND(send_counts.bounced::numeric / (send_counts.sent + send_counts.delivered + send_counts.bounced) * 100, 2) ELSE 0 END,\n  updated_at = now()\nFROM send_counts\nWHERE email_campaigns.id = '{{ $('Calcular Batch de Envio').first().json.campaign_id }}';",
+        "options": {}
+      },
+      "id": "update-campaign-metrics",
+      "name": "Atualizar Métricas da Campanha",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2420, 400],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE clickmail.warmup_schedule SET actual_sent = (SELECT COUNT(*) FROM clickmail.email_sends WHERE campaign_id = '{{ $('Calcular Batch de Envio').first().json.campaign_id }}' AND created_at::date = CURRENT_DATE), status = CASE WHEN (SELECT COUNT(*) FROM clickmail.email_sends WHERE campaign_id = '{{ $('Calcular Batch de Envio').first().json.campaign_id }}' AND created_at::date = CURRENT_DATE) >= planned_volume THEN 'completed' ELSE 'in_progress' END, executed_at = now() WHERE id = '{{ $('Calcular Batch de Envio').first().json.schedule_id }}';",
+        "options": {}
+      },
+      "id": "update-warmup-schedule",
+      "name": "Atualizar Schedule do Dia",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2640, 400],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Cron (Hora em Hora, Seg-Sex, 8h-18h)": {
+      "main": [
+        [{ "node": "Buscar Campanhas Ativas", "type": "main", "index": 0 }]
+      ]
+    },
+    "Buscar Campanhas Ativas": {
+      "main": [
+        [{ "node": "Domínio Saudável?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Domínio Saudável?": {
+      "main": [
+        [{ "node": "Buscar Schedule de Hoje", "type": "main", "index": 0 }],
+        [{ "node": "Pausar (Domínio Doente)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Buscar Schedule de Hoje": {
+      "main": [
+        [{ "node": "Calcular Batch de Envio", "type": "main", "index": 0 }]
+      ]
+    },
+    "Calcular Batch de Envio": {
+      "main": [
+        [{ "node": "Deve Enviar?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Deve Enviar?": {
+      "main": [
+        [
+          { "node": "Buscar Contatos Elegíveis", "type": "main", "index": 0 },
+          { "node": "Buscar Variações", "type": "main", "index": 0 }
+        ],
+        []
+      ]
+    },
+    "Buscar Contatos Elegíveis": {
+      "main": [
+        [{ "node": "Preparar Envios", "type": "main", "index": 0 }]
+      ]
+    },
+    "Buscar Variações": {
+      "main": [
+        [{ "node": "Preparar Envios", "type": "main", "index": 0 }]
+      ]
+    },
+    "Preparar Envios": {
+      "main": [
+        [{ "node": "Enviar via Amazon SES", "type": "main", "index": 0 }]
+      ]
+    },
+    "Enviar via Amazon SES": {
+      "main": [
+        [{ "node": "Parsear Resposta SES", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parsear Resposta SES": {
+      "main": [
+        [{ "node": "Registrar Envio", "type": "main", "index": 0 }]
+      ]
+    },
+    "Registrar Envio": {
+      "main": [
+        [
+          { "node": "SES Rate Limit (100ms)", "type": "main", "index": 0 },
+          { "node": "Atualizar Métricas da Campanha", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Atualizar Métricas da Campanha": {
+      "main": [
+        [{ "node": "Atualizar Schedule do Dia", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "tags": [
+    { "name": "clickmail" },
+    { "name": "warmup" },
+    { "name": "ses" }
+  ]
+}

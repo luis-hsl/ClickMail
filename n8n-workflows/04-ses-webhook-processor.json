@@ -1,0 +1,268 @@
+{
+  "name": "Clickmail — Processar Eventos SES",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ses-webhook",
+        "responseMode": "lastNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook SES (SNS)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json;\n\n// SNS envia SubscriptionConfirmation na primeira vez\nif (body.Type === 'SubscriptionConfirmation') {\n  return {\n    action: 'confirm_subscription',\n    subscribeUrl: body.SubscribeURL\n  };\n}\n\n// Parse da mensagem SNS\nlet message;\ntry {\n  message = typeof body.Message === 'string' ? JSON.parse(body.Message) : body.Message;\n} catch(e) {\n  return { action: 'skip', reason: 'Invalid message format' };\n}\n\nconst eventType = message.eventType || message.notificationType;\n\nlet result = {\n  action: 'process',\n  event_type: eventType,\n  ses_message_id: null,\n  email: null,\n  bounce_type: null,\n  timestamp: null\n};\n\nswitch(eventType) {\n  case 'Bounce':\n    result.ses_message_id = message.mail?.messageId;\n    result.email = message.bounce?.bouncedRecipients?.[0]?.emailAddress;\n    result.bounce_type = message.bounce?.bounceType === 'Permanent' ? 'hard' : 'soft';\n    result.timestamp = message.bounce?.timestamp;\n    result.status = 'bounced';\n    break;\n    \n  case 'Complaint':\n    result.ses_message_id = message.mail?.messageId;\n    result.email = message.complaint?.complainedRecipients?.[0]?.emailAddress;\n    result.timestamp = message.complaint?.timestamp;\n    result.status = 'complained';\n    break;\n    \n  case 'Delivery':\n    result.ses_message_id = message.mail?.messageId;\n    result.email = message.delivery?.recipients?.[0];\n    result.timestamp = message.delivery?.timestamp;\n    result.status = 'delivered';\n    break;\n    \n  case 'Open':\n    result.ses_message_id = message.mail?.messageId;\n    result.timestamp = message.open?.timestamp;\n    result.status = 'opened';\n    break;\n    \n  case 'Click':\n    result.ses_message_id = message.mail?.messageId;\n    result.timestamp = message.click?.timestamp;\n    result.status = 'clicked';\n    break;\n    \n  default:\n    result.action = 'skip';\n    result.reason = 'Unknown event type: ' + eventType;\n}\n\nreturn result;"
+      },
+      "id": "parse-sns-message",
+      "name": "Parsear Mensagem SNS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "confirm_subscription",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "is-subscription",
+      "name": "É Confirmação SNS?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.subscribeUrl }}",
+        "options": {}
+      },
+      "id": "confirm-sns",
+      "name": "Confirmar Subscription SNS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "process",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "should-process",
+      "name": "Deve Processar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [880, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT es.id, es.campaign_id, es.variant_id, es.contact_id FROM clickmail.email_sends es WHERE es.ses_message_id = '{{ $json.ses_message_id }}' LIMIT 1;",
+        "options": {}
+      },
+      "id": "find-send-record",
+      "name": "Buscar Registro de Envio",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1100, 400],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const event = $('Parsear Mensagem SNS').first().json;\nconst sendRecord = $input.first().json;\n\nif (!sendRecord || !sendRecord.id) {\n  return { skip: true, reason: 'Send record not found' };\n}\n\nlet updateFields = [];\nlet contactUpdates = [];\n\nswitch(event.status) {\n  case 'delivered':\n    updateFields.push(`status = 'delivered'`, `delivered_at = '${event.timestamp}'`);\n    break;\n    \n  case 'opened':\n    updateFields.push(\n      `status = CASE WHEN status NOT IN ('clicked') THEN 'opened' ELSE status END`,\n      `first_opened_at = COALESCE(first_opened_at, '${event.timestamp}')`\n    );\n    contactUpdates.push(`total_opened = total_opened + 1`, `last_opened_at = now()`);\n    break;\n    \n  case 'clicked':\n    updateFields.push(`status = 'clicked'`, `first_clicked_at = COALESCE(first_clicked_at, '${event.timestamp}')`);\n    contactUpdates.push(`total_clicked = total_clicked + 1`);\n    break;\n    \n  case 'bounced':\n    updateFields.push(`status = 'bounced'`, `bounced_at = '${event.timestamp}'`, `bounce_type = '${event.bounce_type}'`);\n    contactUpdates.push(`total_bounced = total_bounced + 1`);\n    if (event.bounce_type === 'hard') {\n      contactUpdates.push(`is_blacklisted = TRUE`);\n    }\n    break;\n    \n  case 'complained':\n    updateFields.push(`status = 'complained'`, `complained_at = '${event.timestamp}'`);\n    contactUpdates.push(`total_complained = total_complained + 1`, `is_blacklisted = TRUE`);\n    break;\n}\n\nreturn {\n  send_id: sendRecord.id,\n  campaign_id: sendRecord.campaign_id,\n  variant_id: sendRecord.variant_id,\n  contact_id: sendRecord.contact_id,\n  event_status: event.status,\n  update_sql: updateFields.join(', '),\n  contact_update_sql: contactUpdates.length > 0 ? contactUpdates.join(', ') : null\n};"
+      },
+      "id": "build-update-queries",
+      "name": "Montar Queries de Update",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE clickmail.email_sends SET {{ $json.update_sql }}, metadata = metadata || '{\"last_event\": \"{{ $json.event_status }}\"}'::jsonb WHERE id = '{{ $json.send_id }}';",
+        "options": {}
+      },
+      "id": "update-send-record",
+      "name": "Atualizar Envio",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1540, 400],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $('Montar Queries de Update').first().json.contact_update_sql }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "has-contact-update",
+      "name": "Atualizar Contato?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [1760, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE clickmail.email_contacts SET {{ $('Montar Queries de Update').first().json.contact_update_sql }}, updated_at = now() WHERE id = '{{ $('Montar Queries de Update').first().json.contact_id }}';",
+        "options": {}
+      },
+      "id": "update-contact",
+      "name": "Atualizar Contato",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1980, 300],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH stats AS (\n  SELECT\n    COUNT(*) FILTER (WHERE status IN ('sent','delivered','opened','clicked')) as total_sent,\n    COUNT(*) FILTER (WHERE status IN ('delivered','opened','clicked')) as total_delivered,\n    COUNT(*) FILTER (WHERE status IN ('opened','clicked')) as total_opened,\n    COUNT(*) FILTER (WHERE status = 'clicked') as total_clicked,\n    COUNT(*) FILTER (WHERE status = 'bounced') as total_bounced,\n    COUNT(*) FILTER (WHERE status = 'complained') as total_complained\n  FROM clickmail.email_sends\n  WHERE campaign_id = '{{ $('Montar Queries de Update').first().json.campaign_id }}'\n)\nUPDATE clickmail.email_campaigns SET\n  total_sent = stats.total_sent,\n  total_delivered = stats.total_delivered,\n  total_opened = stats.total_opened,\n  total_clicked = stats.total_clicked,\n  total_bounced = stats.total_bounced,\n  total_complained = stats.total_complained,\n  open_rate = CASE WHEN stats.total_delivered > 0 THEN ROUND(stats.total_opened::numeric / stats.total_delivered * 100, 2) ELSE 0 END,\n  click_rate = CASE WHEN stats.total_delivered > 0 THEN ROUND(stats.total_clicked::numeric / stats.total_delivered * 100, 2) ELSE 0 END,\n  bounce_rate = CASE WHEN stats.total_sent > 0 THEN ROUND(stats.total_bounced::numeric / stats.total_sent * 100, 2) ELSE 0 END,\n  updated_at = now()\nFROM stats\nWHERE email_campaigns.id = '{{ $('Montar Queries de Update').first().json.campaign_id }}';",
+        "options": {}
+      },
+      "id": "update-campaign-metrics",
+      "name": "Atualizar Métricas Campanha",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2200, 400],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH domain_stats AS (\n  SELECT\n    d.id as domain_id,\n    SUM(c.total_sent) as total_sent,\n    SUM(c.total_delivered) as total_delivered,\n    SUM(c.total_bounced) as total_bounced,\n    SUM(c.total_complained) as total_complained\n  FROM clickmail.email_domains d\n  JOIN clickmail.email_campaigns c ON c.domain_id = d.id\n  WHERE d.id = (\n    SELECT domain_id FROM clickmail.email_campaigns\n    WHERE id = '{{ $('Montar Queries de Update').first().json.campaign_id }}'\n  )\n  GROUP BY d.id\n)\nUPDATE clickmail.email_domains SET\n  total_sent = ds.total_sent,\n  total_delivered = ds.total_delivered,\n  total_bounced = ds.total_bounced,\n  total_complaints = ds.total_complained,\n  bounce_rate = CASE WHEN ds.total_sent > 0 THEN ROUND(ds.total_bounced::numeric / ds.total_sent * 100, 2) ELSE 0 END,\n  complaint_rate = CASE WHEN ds.total_sent > 0 THEN ROUND(ds.total_complained::numeric / ds.total_sent * 100, 2) ELSE 0 END,\n  reputation_score = GREATEST(0, 100 - (CASE WHEN ds.total_sent > 0 THEN (ds.total_bounced::numeric / ds.total_sent * 500 + ds.total_complained::numeric / ds.total_sent * 1000) ELSE 0 END)::int),\n  health_status = CASE\n    WHEN (ds.total_bounced::numeric / GREATEST(ds.total_sent, 1) * 100) > 5 OR (ds.total_complained::numeric / GREATEST(ds.total_sent, 1) * 100) > 0.1 THEN 'critical'\n    WHEN (ds.total_bounced::numeric / GREATEST(ds.total_sent, 1) * 100) > 2 OR (ds.total_complained::numeric / GREATEST(ds.total_sent, 1) * 100) > 0.05 THEN 'warning'\n    ELSE 'healthy'\n  END::clickmail.domain_health_status,\n  updated_at = now()\nFROM domain_stats ds\nWHERE email_domains.id = ds.domain_id;",
+        "options": {}
+      },
+      "id": "update-domain-metrics",
+      "name": "Atualizar Métricas Domínio",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2420, 400],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook SES (SNS)": {
+      "main": [
+        [{ "node": "Parsear Mensagem SNS", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parsear Mensagem SNS": {
+      "main": [
+        [{ "node": "É Confirmação SNS?", "type": "main", "index": 0 }]
+      ]
+    },
+    "É Confirmação SNS?": {
+      "main": [
+        [{ "node": "Confirmar Subscription SNS", "type": "main", "index": 0 }],
+        [{ "node": "Deve Processar?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Deve Processar?": {
+      "main": [
+        [{ "node": "Buscar Registro de Envio", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Buscar Registro de Envio": {
+      "main": [
+        [{ "node": "Montar Queries de Update", "type": "main", "index": 0 }]
+      ]
+    },
+    "Montar Queries de Update": {
+      "main": [
+        [{ "node": "Atualizar Envio", "type": "main", "index": 0 }]
+      ]
+    },
+    "Atualizar Envio": {
+      "main": [
+        [{ "node": "Atualizar Contato?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Atualizar Contato?": {
+      "main": [
+        [{ "node": "Atualizar Contato", "type": "main", "index": 0 }],
+        [{ "node": "Atualizar Métricas Campanha", "type": "main", "index": 0 }]
+      ]
+    },
+    "Atualizar Contato": {
+      "main": [
+        [{ "node": "Atualizar Métricas Campanha", "type": "main", "index": 0 }]
+      ]
+    },
+    "Atualizar Métricas Campanha": {
+      "main": [
+        [{ "node": "Atualizar Métricas Domínio", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "tags": [
+    { "name": "clickmail" },
+    { "name": "ses" },
+    { "name": "tracking" }
+  ]
+}

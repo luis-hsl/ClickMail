@@ -1,0 +1,271 @@
+{
+  "name": "Clickmail — Verificar Lista de Emails",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "verify-email-list",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE clickmail.email_lists SET verification_status = 'processing', verification_started_at = now() WHERE id = '{{ $json.list_id }}' RETURNING *;",
+        "options": {}
+      },
+      "id": "update-list-status",
+      "name": "Marcar Lista como Processando",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [440, 300],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, email, name FROM clickmail.email_contacts WHERE list_id = '{{ $('Webhook Trigger').item.json.list_id }}' AND verification_status = 'pending' ORDER BY created_at LIMIT 500;",
+        "options": {}
+      },
+      "id": "fetch-pending-contacts",
+      "name": "Buscar Contatos Pendentes",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [660, 300],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-has-contacts",
+              "leftValue": "={{ $json.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-has-contacts",
+      "name": "Tem Contatos?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [880, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.millionverifier.com/api/v3/",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "api",
+              "value": "={{ $env.MILLIONVERIFIER_API_KEY }}"
+            },
+            {
+              "name": "email",
+              "value": "={{ $json.email }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "verify-single-email",
+      "name": "Verificar Email (MillionVerifier)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Mapear resultado do MillionVerifier para nosso enum\nconst result = $input.item.json;\nconst contactId = $('Buscar Contatos Pendentes').item.json.id;\n\nlet status = 'unknown';\n\n// MillionVerifier result codes:\n// 1 = ok (valid)\n// 2 = catch_all (risky)\n// 3 = unknown (unknown)\n// 4 = error (invalid)\n// 5 = disposable (invalid)\n// 6 = invalid (invalid)\nswitch(result.result) {\n  case 'ok':\n    status = 'valid';\n    break;\n  case 'catch_all':\n    status = 'risky';\n    break;\n  case 'unknown':\n    status = 'unknown';\n    break;\n  case 'error':\n  case 'disposable':\n  case 'invalid':\n    status = 'invalid';\n    break;\n  default:\n    status = 'unknown';\n}\n\nreturn {\n  contact_id: contactId,\n  email: result.email,\n  verification_status: status,\n  verification_result: JSON.stringify(result),\n  quality_score: result.quality_score || 0\n};"
+      },
+      "id": "map-verification-result",
+      "name": "Mapear Resultado",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE clickmail.email_contacts SET verification_status = '{{ $json.verification_status }}'::clickmail.email_verification_status, verification_result = '{{ $json.verification_result }}'::jsonb, verified_at = now(), updated_at = now() WHERE id = '{{ $json.contact_id }}';",
+        "options": {}
+      },
+      "id": "update-contact-status",
+      "name": "Atualizar Contato",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1540, 200],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 0.5,
+        "unit": "seconds"
+      },
+      "id": "rate-limit-wait",
+      "name": "Rate Limit (0.5s)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1760, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH counts AS (\n  SELECT\n    COUNT(*) FILTER (WHERE verification_status = 'valid') as valid_count,\n    COUNT(*) FILTER (WHERE verification_status = 'invalid') as invalid_count,\n    COUNT(*) FILTER (WHERE verification_status = 'risky') as risky_count,\n    COUNT(*) FILTER (WHERE verification_status = 'pending') as pending_count,\n    COUNT(*) as total_count\n  FROM clickmail.email_contacts\n  WHERE list_id = '{{ $('Webhook Trigger').item.json.list_id }}'\n)\nUPDATE clickmail.email_lists SET\n  valid_contacts = counts.valid_count,\n  invalid_contacts = counts.invalid_count,\n  risky_contacts = counts.risky_count,\n  total_contacts = counts.total_count,\n  verification_status = CASE WHEN counts.pending_count = 0 THEN 'completed' ELSE 'processing' END,\n  verification_completed_at = CASE WHEN counts.pending_count = 0 THEN now() ELSE NULL END,\n  updated_at = now()\nFROM counts\nWHERE email_lists.id = '{{ $('Webhook Trigger').item.json.list_id }}'\nRETURNING email_lists.*;",
+        "options": {}
+      },
+      "id": "update-list-counts",
+      "name": "Atualizar Contadores da Lista",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1100, 500],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.pending_count }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ]
+        }
+      },
+      "id": "check-more-pending",
+      "name": "Mais Pendentes?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [1320, 500]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, message: 'Verificação concluída', list_id: $('Webhook Trigger').item.json.list_id }) }}"
+      },
+      "id": "respond-success",
+      "name": "Responder Sucesso",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1540, 600]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [{ "node": "Marcar Lista como Processando", "type": "main", "index": 0 }]
+      ]
+    },
+    "Marcar Lista como Processando": {
+      "main": [
+        [{ "node": "Buscar Contatos Pendentes", "type": "main", "index": 0 }]
+      ]
+    },
+    "Buscar Contatos Pendentes": {
+      "main": [
+        [{ "node": "Tem Contatos?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Tem Contatos?": {
+      "main": [
+        [{ "node": "Verificar Email (MillionVerifier)", "type": "main", "index": 0 }],
+        [{ "node": "Atualizar Contadores da Lista", "type": "main", "index": 0 }]
+      ]
+    },
+    "Verificar Email (MillionVerifier)": {
+      "main": [
+        [{ "node": "Mapear Resultado", "type": "main", "index": 0 }]
+      ]
+    },
+    "Mapear Resultado": {
+      "main": [
+        [{ "node": "Atualizar Contato", "type": "main", "index": 0 }]
+      ]
+    },
+    "Atualizar Contato": {
+      "main": [
+        [{ "node": "Rate Limit (0.5s)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Rate Limit (0.5s)": {
+      "main": [
+        [{ "node": "Atualizar Contadores da Lista", "type": "main", "index": 0 }]
+      ]
+    },
+    "Atualizar Contadores da Lista": {
+      "main": [
+        [{ "node": "Mais Pendentes?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Mais Pendentes?": {
+      "main": [
+        [{ "node": "Buscar Contatos Pendentes", "type": "main", "index": 0 }],
+        [{ "node": "Responder Sucesso", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "tags": [
+    { "name": "clickmail" },
+    { "name": "verification" }
+  ]
+}
