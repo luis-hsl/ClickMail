@@ -1,0 +1,198 @@
+{
+  "name": "Clickmail — Monitoramento Diário de Reputação",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 0 6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "Cron (Diário 6h)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM clickmail.email_domains WHERE warmup_status != 'not_started' OR total_sent > 0;",
+        "options": {}
+      },
+      "id": "fetch-active-domains",
+      "name": "Buscar Domínios Ativos",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [440, 300],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://dns.google/resolve?name={{ $json.domain }}&type=TXT",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "check-spf",
+      "name": "Verificar SPF (DNS)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 200]
+    },
+    {
+      "parameters": {
+        "url": "=https://dns.google/resolve?name=_dmarc.{{ $('Buscar Domínios Ativos').item.json.domain }}&type=TXT",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "check-dmarc",
+      "name": "Verificar DMARC (DNS)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "const domain = $('Buscar Domínios Ativos').item.json;\nconst spfResponse = $('Verificar SPF (DNS)').first().json;\nconst dmarcResponse = $('Verificar DMARC (DNS)').first().json;\n\n// Verificar SPF\nlet spfConfigured = false;\nlet spfRecord = null;\nif (spfResponse.Answer) {\n  for (const answer of spfResponse.Answer) {\n    const data = answer.data?.replace(/\"/g, '') || '';\n    if (data.startsWith('v=spf1')) {\n      spfConfigured = true;\n      spfRecord = data;\n      break;\n    }\n  }\n}\n\n// Verificar DMARC\nlet dmarcConfigured = false;\nlet dmarcPolicy = null;\nif (dmarcResponse.Answer) {\n  for (const answer of dmarcResponse.Answer) {\n    const data = answer.data?.replace(/\"/g, '') || '';\n    if (data.startsWith('v=DMARC1')) {\n      dmarcConfigured = true;\n      dmarcPolicy = data;\n      break;\n    }\n  }\n}\n\n// DKIM é mais difícil de verificar sem saber o selector\n// Mantemos o valor atual do banco\nconst dkimConfigured = domain.dkim_configured;\n\n// Calcular health\nconst checksOk = [spfConfigured, dkimConfigured, dmarcConfigured].filter(Boolean).length;\nlet healthStatus = 'critical';\nif (checksOk === 3) healthStatus = 'healthy';\nelse if (checksOk >= 1) healthStatus = 'warning';\n\n// Calcular reputation baseado em métricas\nlet reputationScore = 100;\nif (domain.total_sent > 0) {\n  const bounceImpact = (domain.total_bounced / domain.total_sent) * 500;\n  const complaintImpact = (domain.total_complaints / domain.total_sent) * 1000;\n  reputationScore = Math.max(0, Math.round(100 - bounceImpact - complaintImpact));\n}\n\n// Forçar health_status pelo reputation\nif (reputationScore < 50) healthStatus = 'critical';\nelse if (reputationScore < 70) healthStatus = 'warning';\n\nreturn {\n  domain_id: domain.id,\n  domain: domain.domain,\n  spf_configured: spfConfigured,\n  spf_record: spfRecord,\n  dkim_configured: dkimConfigured,\n  dmarc_configured: dmarcConfigured,\n  dmarc_policy: dmarcPolicy,\n  health_status: healthStatus,\n  reputation_score: reputationScore,\n  should_pause: reputationScore < 50 || domain.bounce_rate > 5 || domain.complaint_rate > 0.1,\n  alerts: [\n    !spfConfigured ? 'SPF não configurado' : null,\n    !dkimConfigured ? 'DKIM não verificado' : null,\n    !dmarcConfigured ? 'DMARC não configurado' : null,\n    domain.bounce_rate > 5 ? `Bounce rate alto: ${domain.bounce_rate}%` : null,\n    domain.complaint_rate > 0.1 ? `Complaint rate alto: ${domain.complaint_rate}%` : null,\n    reputationScore < 70 ? `Reputação baixa: ${reputationScore}/100` : null\n  ].filter(Boolean)\n};"
+      },
+      "id": "analyze-health",
+      "name": "Analisar Saúde do Domínio",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE clickmail.email_domains SET spf_configured = {{ $json.spf_configured }}, spf_record = {{ $json.spf_record ? \"'\" + $json.spf_record.replace(/'/g, \"''\") + \"'\" : 'NULL' }}, dkim_configured = {{ $json.dkim_configured }}, dmarc_configured = {{ $json.dmarc_configured }}, dmarc_policy = {{ $json.dmarc_policy ? \"'\" + $json.dmarc_policy.replace(/'/g, \"''\") + \"'\" : 'NULL' }}, health_status = '{{ $json.health_status }}'::clickmail.domain_health_status, reputation_score = {{ $json.reputation_score }}, last_checked_at = now(), updated_at = now() WHERE id = '{{ $json.domain_id }}';",
+        "options": {}
+      },
+      "id": "update-domain",
+      "name": "Atualizar Domínio",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1100, 300],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $('Analisar Saúde do Domínio').first().json.should_pause }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "should-pause",
+      "name": "Deve Pausar Campanhas?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [1320, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE clickmail.email_campaigns SET status = 'paused', updated_at = now() WHERE domain_id = '{{ $('Analisar Saúde do Domínio').first().json.domain_id }}' AND status IN ('warming_up', 'sending'); UPDATE clickmail.email_domains SET warmup_status = 'paused' WHERE id = '{{ $('Analisar Saúde do Domínio').first().json.domain_id }}';",
+        "options": {}
+      },
+      "id": "pause-campaigns",
+      "name": "Pausar Campanhas do Domínio",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1540, 200],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const analysis = $('Analisar Saúde do Domínio').first().json;\n\nconsole.log(`[Clickmail] Domínio: ${analysis.domain}`);\nconsole.log(`[Clickmail] Saúde: ${analysis.health_status}`);\nconsole.log(`[Clickmail] Reputação: ${analysis.reputation_score}/100`);\n\nif (analysis.alerts.length > 0) {\n  console.log(`[Clickmail] ALERTAS:`);\n  analysis.alerts.forEach(a => console.log(`  ⚠️ ${a}`));\n}\n\nif (analysis.should_pause) {\n  console.log(`[Clickmail] ❌ Campanhas pausadas automaticamente`);\n} else {\n  console.log(`[Clickmail] ✅ Tudo operando normalmente`);\n}\n\nreturn {\n  domain: analysis.domain,\n  health: analysis.health_status,\n  reputation: analysis.reputation_score,\n  alerts: analysis.alerts,\n  paused: analysis.should_pause\n};"
+      },
+      "id": "log-results",
+      "name": "Log de Resultado",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 400]
+    }
+  ],
+  "connections": {
+    "Cron (Diário 6h)": {
+      "main": [
+        [{ "node": "Buscar Domínios Ativos", "type": "main", "index": 0 }]
+      ]
+    },
+    "Buscar Domínios Ativos": {
+      "main": [
+        [
+          { "node": "Verificar SPF (DNS)", "type": "main", "index": 0 },
+          { "node": "Verificar DMARC (DNS)", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Verificar SPF (DNS)": {
+      "main": [
+        [{ "node": "Analisar Saúde do Domínio", "type": "main", "index": 0 }]
+      ]
+    },
+    "Verificar DMARC (DNS)": {
+      "main": [
+        [{ "node": "Analisar Saúde do Domínio", "type": "main", "index": 0 }]
+      ]
+    },
+    "Analisar Saúde do Domínio": {
+      "main": [
+        [{ "node": "Atualizar Domínio", "type": "main", "index": 0 }]
+      ]
+    },
+    "Atualizar Domínio": {
+      "main": [
+        [{ "node": "Deve Pausar Campanhas?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Deve Pausar Campanhas?": {
+      "main": [
+        [{ "node": "Pausar Campanhas do Domínio", "type": "main", "index": 0 }],
+        [{ "node": "Log de Resultado", "type": "main", "index": 0 }]
+      ]
+    },
+    "Pausar Campanhas do Domínio": {
+      "main": [
+        [{ "node": "Log de Resultado", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "tags": [
+    { "name": "clickmail" },
+    { "name": "monitoring" },
+    { "name": "reputation" }
+  ]
+}

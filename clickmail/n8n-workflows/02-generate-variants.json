@@ -1,0 +1,213 @@
+{
+  "name": "Clickmail — Gerar Variações com IA",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "generate-variants",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.*, d.domain, d.health_status, d.reputation_score, l.name as list_name, l.total_contacts, l.valid_contacts FROM clickmail.email_campaigns c LEFT JOIN clickmail.email_domains d ON c.domain_id = d.id LEFT JOIN clickmail.email_lists l ON c.list_id = l.id WHERE c.id = '{{ $json.campaign_id }}';",
+        "options": {}
+      },
+      "id": "fetch-campaign",
+      "name": "Buscar Dados da Campanha",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [440, 300],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const campaign = $input.first().json;\n\nconst prompt = `Você é um especialista em email marketing e deliverability. Gere 5 variações de email otimizadas para NÃO cair no spam.\n\nContexto da campanha:\n- Nome: ${campaign.name}\n- Descrição: ${campaign.description || 'Não informada'}\n- Remetente: ${campaign.from_name} <${campaign.from_email}>\n- Domínio: ${campaign.domain}\n- Total de contatos: ${campaign.valid_contacts || campaign.total_contacts}\n\nREGRAS ANTI-SPAM OBRIGATÓRIAS:\n1. Sem palavras-gatilho: \"grátis\", \"ganhe\", \"clique aqui\", \"oferta\", \"promoção\", \"urgente\", \"última chance\"\n2. Sem CAPS LOCK excessivo\n3. Sem múltiplos pontos de exclamação (!!!)\n4. Proporção texto/link: máximo 2 links por email\n5. Tom conversacional, como se fosse de pessoa para pessoa\n6. Assunto curto (máximo 50 caracteres)\n7. Preview text complementando o assunto (máximo 90 caracteres)\n8. Corpo em texto puro com formatação mínima\n9. Incluir opção de descadastro no rodapé\n10. Personalização com {{name}} quando possível\n\nPara cada variação, retorne EXATAMENTE neste formato JSON:\n{\n  \"variants\": [\n    {\n      \"label\": \"A\",\n      \"subject\": \"assunto aqui\",\n      \"preview_text\": \"preview text aqui\",\n      \"body_html\": \"<html com formatação mínima>\",\n      \"body_text\": \"versão plaintext do email\",\n      \"strategy\": \"breve descrição da estratégia usada\"\n    }\n  ]\n}\n\nGere 5 variações (A, B, C, D, E) com estratégias diferentes:\n- A: Curiosidade / pergunta no assunto\n- B: Benefício direto e claro\n- C: Prova social / números\n- D: História / narrativa pessoal\n- E: Urgência sutil (sem palavras spam)\n\nResponda APENAS com o JSON, sem markdown, sem backticks.`;\n\nreturn { prompt, campaign_id: campaign.id };"
+      },
+      "id": "build-prompt",
+      "name": "Montar Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={{ $env.GEMINI_API_KEY }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [\n    {\n      \"parts\": [\n        {\n          \"text\": {{ JSON.stringify($json.prompt) }}\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"temperature\": 0.8,\n    \"maxOutputTokens\": 4096,\n    \"responseMimeType\": \"application/json\"\n  }\n}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "call-gemini",
+      "name": "Chamar Gemini API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst campaignId = $('Montar Prompt').first().json.campaign_id;\n\n// Extrair texto da resposta do Gemini\nconst text = response.candidates?.[0]?.content?.parts?.[0]?.text;\nif (!text) {\n  throw new Error('Resposta vazia do Gemini: ' + JSON.stringify(response));\n}\n\n// Parse do JSON\nlet parsed;\ntry {\n  // Limpar possíveis backticks\n  const clean = text.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n  parsed = JSON.parse(clean);\n} catch(e) {\n  throw new Error('Erro ao parsear resposta do Gemini: ' + e.message);\n}\n\n// Mapear para inserção no Supabase\nconst variants = parsed.variants.map(v => ({\n  campaign_id: campaignId,\n  variant_label: v.label,\n  subject: v.subject,\n  preview_text: v.preview_text,\n  body_html: v.body_html,\n  body_text: v.body_text,\n  spam_score: null,\n  spam_analysis: JSON.stringify({ strategy: v.strategy }),\n  weight: 20\n}));\n\nreturn variants.map(v => ({ json: v }));"
+      },
+      "id": "parse-variants",
+      "name": "Parsear Variações",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO clickmail.email_variants (campaign_id, variant_label, subject, preview_text, body_html, body_text, spam_score, spam_analysis, weight) VALUES ('{{ $json.campaign_id }}', '{{ $json.variant_label }}', {{ $json.subject | replace(\"'\", \"''\") | tojson }}, {{ $json.preview_text | replace(\"'\", \"''\") | tojson }}, {{ $json.body_html | replace(\"'\", \"''\") | tojson }}, {{ $json.body_text | replace(\"'\", \"''\") | tojson }}, NULL, '{{ $json.spam_analysis }}'::jsonb, {{ $json.weight }}) RETURNING *;",
+        "options": {}
+      },
+      "id": "insert-variant",
+      "name": "Salvar Variação no DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1320, 300],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Calcular spam score básico baseado em regras\nconst variant = $input.item.json;\nlet score = 0;\nconst issues = [];\n\nconst subject = (variant.subject || '').toLowerCase();\nconst body = (variant.body_text || '').toLowerCase();\nconst html = (variant.body_html || '').toLowerCase();\n\n// Palavras spam no assunto\nconst spamWords = ['grátis', 'gratuito', 'ganhe', 'clique aqui', 'oferta', 'promoção', 'urgente', 'última chance', 'desconto', 'imperdível', 'free', 'click here', 'act now', 'limited time', 'buy now', 'order now', 'winner', 'congratulations'];\nfor (const word of spamWords) {\n  if (subject.includes(word)) {\n    score += 2;\n    issues.push(`Palavra spam no assunto: \"${word}\"`);\n  }\n  if (body.includes(word)) {\n    score += 1;\n    issues.push(`Palavra spam no corpo: \"${word}\"`);\n  }\n}\n\n// CAPS no assunto\nconst capsRatio = (variant.subject.match(/[A-Z]/g) || []).length / variant.subject.length;\nif (capsRatio > 0.5) {\n  score += 2;\n  issues.push('Excesso de CAPS LOCK no assunto');\n}\n\n// Múltiplas exclamações\nif ((variant.subject.match(/!/g) || []).length > 1) {\n  score += 1.5;\n  issues.push('Múltiplos pontos de exclamação no assunto');\n}\n\n// Muitos links\nconst linkCount = (html.match(/href=/g) || []).length;\nif (linkCount > 3) {\n  score += 1;\n  issues.push(`Muitos links no HTML (${linkCount})`);\n}\n\n// Sem versão texto\nif (!variant.body_text || variant.body_text.length < 50) {\n  score += 1.5;\n  issues.push('Versão plaintext muito curta ou ausente');\n}\n\n// Assunto muito longo\nif (variant.subject.length > 60) {\n  score += 0.5;\n  issues.push('Assunto muito longo (>60 chars)');\n}\n\n// Emojis no assunto (controverso, mas pode pontuar)\nconst emojiCount = (variant.subject.match(/[\\u{1F600}-\\u{1F64F}\\u{1F300}-\\u{1F5FF}\\u{1F680}-\\u{1F6FF}\\u{1F1E0}-\\u{1F1FF}\\u{2600}-\\u{26FF}\\u{2700}-\\u{27BF}]/gu) || []).length;\nif (emojiCount > 2) {\n  score += 1;\n  issues.push('Excesso de emojis no assunto');\n}\n\n// Cap score at 10\nscore = Math.min(score, 10);\n\nreturn {\n  variant_id: variant.id,\n  spam_score: Math.round(score * 100) / 100,\n  spam_analysis: { score, issues, checked_at: new Date().toISOString() }\n};"
+      },
+      "id": "calculate-spam-score",
+      "name": "Calcular Spam Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE clickmail.email_variants SET spam_score = {{ $json.spam_score }}, spam_analysis = '{{ JSON.stringify($json.spam_analysis) }}'::jsonb WHERE id = '{{ $json.variant_id }}';",
+        "options": {}
+      },
+      "id": "update-spam-score",
+      "name": "Salvar Spam Score",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1760, 300],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE clickmail.email_campaigns SET status = 'scheduled', updated_at = now() WHERE id = '{{ $('Montar Prompt').first().json.campaign_id }}';",
+        "options": {}
+      },
+      "id": "update-campaign-status",
+      "name": "Campanha → Scheduled",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1980, 300],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_POSTGRES_CREDENTIAL_ID",
+          "name": "Supabase Clickmail DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, message: '5 variações geradas com spam score', campaign_id: $('Montar Prompt').first().json.campaign_id }) }}"
+      },
+      "id": "respond-success",
+      "name": "Responder Sucesso",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2200, 300]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [{ "node": "Buscar Dados da Campanha", "type": "main", "index": 0 }]
+      ]
+    },
+    "Buscar Dados da Campanha": {
+      "main": [
+        [{ "node": "Montar Prompt", "type": "main", "index": 0 }]
+      ]
+    },
+    "Montar Prompt": {
+      "main": [
+        [{ "node": "Chamar Gemini API", "type": "main", "index": 0 }]
+      ]
+    },
+    "Chamar Gemini API": {
+      "main": [
+        [{ "node": "Parsear Variações", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parsear Variações": {
+      "main": [
+        [{ "node": "Salvar Variação no DB", "type": "main", "index": 0 }]
+      ]
+    },
+    "Salvar Variação no DB": {
+      "main": [
+        [{ "node": "Calcular Spam Score", "type": "main", "index": 0 }]
+      ]
+    },
+    "Calcular Spam Score": {
+      "main": [
+        [{ "node": "Salvar Spam Score", "type": "main", "index": 0 }]
+      ]
+    },
+    "Salvar Spam Score": {
+      "main": [
+        [{ "node": "Campanha → Scheduled", "type": "main", "index": 0 }]
+      ]
+    },
+    "Campanha → Scheduled": {
+      "main": [
+        [{ "node": "Responder Sucesso", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "tags": [
+    { "name": "clickmail" },
+    { "name": "ai" },
+    { "name": "variants" }
+  ]
+}
