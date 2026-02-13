@@ -1,6 +1,87 @@
 import { supabase } from '@/lib/supabase'
 
 // =============================================
+// N8N WEBHOOK HELPER
+// =============================================
+async function getN8nBaseUrl() {
+  const { data } = await supabase
+    .from('app_settings')
+    .select('value')
+    .eq('key', 'N8N_WEBHOOK_BASE_URL')
+    .single()
+  return data?.value || null
+}
+
+async function safeJson(res) {
+  const text = await res.text()
+  if (!text) return { success: true }
+  try { return JSON.parse(text) } catch { return { raw: text } }
+}
+
+export const n8nService = {
+  async triggerVerifyList(listId) {
+    const baseUrl = await getN8nBaseUrl()
+    if (!baseUrl) throw new Error('URL do n8n não configurada. Acesse Configurações.')
+    const url = baseUrl.replace(/\/+$/, '') + '/verify-email-list'
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ list_id: listId }),
+    })
+    if (!res.ok) {
+      const body = await safeJson(res)
+      throw new Error(body.message || body.error || `Erro n8n: ${res.status}`)
+    }
+    return safeJson(res)
+  },
+
+  async triggerGenerateVariants(campaignId) {
+    const baseUrl = await getN8nBaseUrl()
+    if (!baseUrl) throw new Error('URL do n8n não configurada. Acesse Configurações.')
+    const url = baseUrl.replace(/\/+$/, '') + '/generate-variants'
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ campaign_id: campaignId }),
+    })
+    if (!res.ok) {
+      const body = await safeJson(res)
+      throw new Error(body.message || body.error || `Erro n8n: ${res.status}`)
+    }
+    return safeJson(res)
+  },
+}
+
+// =============================================
+// EDGE FUNCTIONS
+// =============================================
+export const edgeFunctionService = {
+  async verifyDns(domain, domainId) {
+    const { data, error } = await supabase.functions.invoke('verify-dns', {
+      body: { domain, domain_id: domainId },
+    })
+    if (error) throw error
+    return data
+  },
+
+  async calculateReputation(domainId = null) {
+    const { data, error } = await supabase.functions.invoke('calculate-reputation', {
+      body: domainId ? { domain_id: domainId } : {},
+    })
+    if (error) throw error
+    return data
+  },
+
+  async triggerN8n(workflow, payload) {
+    const { data, error } = await supabase.functions.invoke('trigger-n8n', {
+      body: { workflow, data: payload },
+    })
+    if (error) throw error
+    return data
+  },
+}
+
+// =============================================
 // DOMAINS
 // =============================================
 export const domainService = {
@@ -69,7 +150,8 @@ export const listService = {
   },
 
   async uploadCSV(file, listId) {
-    const filePath = `lists/${listId}/${file.name}`
+    const { data: { user } } = await supabase.auth.getUser()
+    const filePath = `${user.id}/lists/${listId}/${file.name}`
     const { error } = await supabase.storage
       .from('csv-uploads')
       .upload(filePath, file)
