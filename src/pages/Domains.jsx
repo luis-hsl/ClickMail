@@ -45,24 +45,33 @@ function CopyButton({ text }) {
 
 function DnsRecordRow({ type, name, value, purpose }) {
   return (
-    <div style={{
+    <div className="cm-dns-row" style={{
       display: "grid", gridTemplateColumns: "60px 1fr 1fr 32px", gap: 8, alignItems: "center",
       padding: "8px 12px", borderRadius: 8, border: `1px solid ${C.border}`,
       background: "rgba(255,255,255,0.01)", fontSize: 12,
     }}>
-      <span style={{
-        fontWeight: 700, color: C.info, fontSize: 11, padding: "2px 6px",
-        borderRadius: 4, background: C.infoBg, textAlign: "center",
-      }}>{type}</span>
-      <span style={{
-        fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: C.textMuted,
-        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-      }} title={name}>{name}</span>
-      <span style={{
-        fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: C.text,
-        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-      }} title={value}>{value}</span>
-      <CopyButton text={value} />
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span style={{
+          fontWeight: 700, color: C.info, fontSize: 11, padding: "2px 6px",
+          borderRadius: 4, background: C.infoBg, textAlign: "center",
+        }}>{type}</span>
+        <span className="cm-dns-copy-mobile" style={{ display: "none" }}><CopyButton text={value} /></span>
+      </div>
+      <div className="cm-dns-name" style={{ minWidth: 0 }}>
+        <span className="cm-dns-label" style={{ display: "none", fontSize: 10, color: C.textDim, marginBottom: 2 }}>Nome</span>
+        <span style={{
+          fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: C.textMuted,
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block",
+        }} title={name}>{name}</span>
+      </div>
+      <div className="cm-dns-value" style={{ minWidth: 0 }}>
+        <span className="cm-dns-label" style={{ display: "none", fontSize: 10, color: C.textDim, marginBottom: 2 }}>Valor</span>
+        <span style={{
+          fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: C.text,
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block",
+        }} title={value}>{value}</span>
+      </div>
+      <span className="cm-dns-copy-desktop"><CopyButton text={value} /></span>
     </div>
   );
 }
@@ -104,7 +113,7 @@ function DnsRecordsPanel({ domain, tokens, region = "sa-east-1" }) {
       {open && (
         <div style={{ padding: "0 12px 12px", display: "flex", flexDirection: "column", gap: 6 }}>
           {/* Header */}
-          <div style={{
+          <div className="cm-dns-header" style={{
             display: "grid", gridTemplateColumns: "60px 1fr 1fr 32px", gap: 8,
             padding: "4px 12px", fontSize: 10, color: C.textDim, fontWeight: 600,
             textTransform: "uppercase", letterSpacing: "0.05em",
@@ -137,7 +146,7 @@ function DnsCheck({ label, configured, record }) {
       <div style={{ flex: 1 }}>
         <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{label}</span>
         {record && (
-          <p style={{
+          <p className="cm-dns-check-record" style={{
             fontSize: 11, color: C.textDim, marginTop: 2,
             fontFamily: "'JetBrains Mono', monospace",
             overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 320,
@@ -314,10 +323,32 @@ export default function Domains() {
         @keyframes fadeIn { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: translateY(0) } }
         @keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
         ::placeholder { color: ${C.textDim}; }
+        @media (max-width: 768px) {
+          .cm-domains-header { flex-direction: column !important; gap: 12px !important; }
+          .cm-domains-header button { width: 100% !important; justify-content: center !important; }
+          .cm-domain-top { flex-direction: column !important; gap: 12px !important; align-items: flex-start !important; }
+          .cm-domain-badges { flex-wrap: wrap !important; }
+          .cm-domain-actions { flex-wrap: wrap !important; }
+          .cm-domain-actions button { flex: 1 !important; min-width: 120px !important; justify-content: center !important; }
+          .cm-add-form { flex-direction: column !important; }
+          .cm-add-form button { width: 100% !important; justify-content: center !important; }
+          .cm-dns-header { display: none !important; }
+          .cm-dns-row { grid-template-columns: 1fr !important; gap: 6px !important; padding: 12px !important; }
+          .cm-dns-copy-desktop { display: none !important; }
+          .cm-dns-copy-mobile { display: inline-flex !important; }
+          .cm-dns-label { display: block !important; }
+          .cm-dns-name span, .cm-dns-value span { white-space: normal !important; word-break: break-all !important; }
+          .cm-domain-metrics { grid-template-columns: 1fr 1fr !important; }
+          .cm-dns-checks { gap: 6px !important; }
+          .cm-dns-check-record { max-width: 100% !important; }
+        }
+        @media (max-width: 480px) {
+          .cm-domain-metrics { grid-template-columns: 1fr !important; }
+        }
       `}</style>
 
       {/* Header */}
-      <div style={{
+      <div className="cm-domains-header" style={{
         display: "flex", justifyContent: "space-between", alignItems: "flex-start",
         marginBottom: 28, animation: "fadeIn 0.4s ease-out",
       }}>
@@ -372,7 +403,7 @@ export default function Domains() {
             </div>
           )}
 
-          <form onSubmit={handleAdd} style={{ display: "flex", gap: 10 }}>
+          <form onSubmit={handleAdd} className="cm-add-form" style={{ display: "flex", gap: 10 }}>
             <input
               type="text"
               value={newDomain}
@@ -435,22 +466,22 @@ export default function Domains() {
                 onMouseLeave={e => e.currentTarget.style.borderColor = C.border}
               >
                 {/* Domain Header */}
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+                <div className="cm-domain-top" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                     <div style={{
                       width: 42, height: 42, borderRadius: 12, background: C.accentBg,
-                      display: "flex", alignItems: "center", justifyContent: "center",
+                      display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
                     }}>
                       <Globe size={20} color={C.accent} />
                     </div>
                     <div>
-                      <h3 style={{ fontSize: 17, fontWeight: 700 }}>{d.domain}</h3>
+                      <h3 style={{ fontSize: 17, fontWeight: 700, wordBreak: "break-all" }}>{d.domain}</h3>
                       <p style={{ fontSize: 12, color: C.textDim }}>
                         Adicionado em {new Date(d.created_at).toLocaleDateString("pt-BR")}
                       </p>
                     </div>
                   </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div className="cm-domain-badges" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <span style={{
                       fontSize: 11, fontWeight: 600, padding: "4px 10px", borderRadius: 8,
                       background: ses.bg, color: ses.color,
@@ -476,7 +507,7 @@ export default function Domains() {
                 </div>
 
                 {/* Action Buttons */}
-                <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+                <div className="cm-domain-actions" style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
                   {!hasTokens && (
                     <button
                       onClick={() => handleRegisterSes(d)}
@@ -533,7 +564,7 @@ export default function Domains() {
                 </div>
 
                 {/* Metrics Row */}
-                <div className="cm-grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 20 }}>
+                <div className="cm-grid-4 cm-domain-metrics" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 20 }}>
                   {[
                     { label: "Reputação", value: `${d.reputation_score}/100`, icon: Activity, color: d.reputation_score >= 70 ? C.accent : d.reputation_score >= 40 ? C.warning : C.danger },
                     { label: "DNS Verificados", value: `${dnsOk}/3`, icon: Shield, color: dnsOk === 3 ? C.accent : dnsOk >= 1 ? C.warning : C.danger },
@@ -557,7 +588,7 @@ export default function Domains() {
                 </div>
 
                 {/* DNS Checks */}
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div className="cm-dns-checks" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   <DnsCheck label="SPF" configured={d.spf_configured} record={d.spf_record} />
                   <DnsCheck label="DKIM" configured={d.dkim_configured} record={d.dkim_selector ? `Selector: ${d.dkim_selector}` : null} />
                   <DnsCheck label="DMARC" configured={d.dmarc_configured} record={d.dmarc_policy} />
