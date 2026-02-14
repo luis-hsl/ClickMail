@@ -564,7 +564,8 @@ export default function Domains() {
                 </div>
 
                 {/* DNS Records to configure */}
-                <DnsRecordsPanel domain={d.domain} tokens={d.ses_dkim_tokens} />
+                {/* Only show DNS records when domain is not yet fully verified */}
+                {!d.ses_verified && <DnsRecordsPanel domain={d.domain} tokens={d.ses_dkim_tokens} />}
               </div>
             );
           })}
