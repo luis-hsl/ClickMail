@@ -45,8 +45,9 @@ function CampaignList({ campaigns, loading, onNew, onOpen, onGenerateVariants, g
 
   if (loading) {
     return (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "60vh" }}>
-        <Loader2 size={28} color={C.accent} style={{ animation: "spin 1s linear infinite" }} />
+      <div className="cm-page" style={{ padding: "28px 36px", background: C.bg, minHeight: "100vh" }}>
+        <div style={{ marginBottom: 28, height: 50 }} />
+        <SkeletonCard count={3} />
       </div>
     );
   }

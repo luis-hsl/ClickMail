@@ -142,8 +142,9 @@ function ListsView({ lists, loading, onOpenList, onUpload, onDelete, onVerify, v
 
   if (loading) {
     return (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "60vh" }}>
-        <Loader2 size={28} color={C.accent} style={{ animation: "spin 1s linear infinite" }} />
+      <div className="cm-page" style={{ padding: "28px 36px", background: C.bg, minHeight: "100vh" }}>
+        <div style={{ marginBottom: 28, height: 50 }} />
+        <SkeletonTable rows={6} />
       </div>
     );
   }
@@ -546,8 +547,8 @@ function ContactsView({ list, onBack }) {
         overflow: "hidden", animation: "fadeIn 0.3s ease-out 0.15s both",
       }}>
         {loading ? (
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "60px 0" }}>
-            <Loader2 size={24} color={C.accent} style={{ animation: "spin 1s linear infinite" }} />
+          <div style={{ padding: "16px 24px" }}>
+            <SkeletonTable rows={4} />
           </div>
         ) : contacts.length === 0 ? (
           <div style={{ padding: "60px 24px", textAlign: "center", color: C.textDim, fontSize: 13 }}>
