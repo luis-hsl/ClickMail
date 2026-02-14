@@ -50,6 +50,14 @@ export const edgeFunctionService = {
     if (error) throw error
     return data
   },
+
+  async manageSesIdentity(action, domain, domainId) {
+    const { data, error } = await supabase.functions.invoke('manage-ses-identity', {
+      body: { action, domain, domain_id: domainId },
+    })
+    if (error) throw error
+    return data
+  },
 }
 
 // =============================================
